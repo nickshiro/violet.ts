@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		"declaration": true,
+		"emitDeclarationOnly": true,
+		"outDir": "./dist",
+		"rootDir": "./src",
+		"strict": true,
+		"skipLibCheck": true,
+		"moduleResolution": "node",
+		"target": "ESNext",
+		"module": "ESNext"
+	},
+	"include": ["src/**/*.ts"]
+}
