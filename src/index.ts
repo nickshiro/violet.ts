@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 import { exec } from "node:child_process";
 import { join, resolve } from "node:path";
 import { readdir } from "node:fs/promises";
@@ -15,7 +14,7 @@ export interface Ctx {
 /**
  * Available log levels for controlling output verbosity.
  */
-export type LogLevel = "log" | "warn";
+export type LogLevel = "none" | "error" | "warn" | "log";
 
 /**
  * A fluent builder interface for constructing tasks in a task runner.
@@ -94,6 +93,14 @@ export interface TaskBuilder {
 	 * @returns The same TaskBuilder instance for method chaining.
 	 */
 	warn: (...args: string[]) => TaskBuilder;
+
+	/**
+	 * Logs error messages during task execution.
+	 *
+	 * @param args - Values to log. Converted to strings and joined with spaces.
+	 * @returns The same TaskBuilder instance for method chaining.
+	 */
+	error: (...args: string[]) => TaskBuilder;
 }
 
 /**
@@ -122,42 +129,12 @@ export interface Violet {
 	 *   .exec('rm', '-rf', '~/');
 	 */
 	addTask: (name: string) => TaskBuilder;
-
-	/**
-	 * Sets the global log level.
-	 *
-	 * Controls which log messages are displayed during task execution:
-	 * - `'log'`: Debug log
-	 * - `'warn'`: Warnings and errors
-	 *
-	 * @param level - The minimum severity level to display.
-	 *
-	 * @example
-	 * violet.logLevel('warn'); // Only show warnings and errors
-	 */
-	logLevel: (level: LogLevel) => void;
-}
-
-function exeCommand(cmd: string): Promise<void> {
-	return new Promise<void>((resolve, reject) => {
-		exec(cmd, (error, stdout, stderr) => {
-			if (error) {
-				console.error(`Error: ${error.message}`);
-				reject(error);
-				return;
-			}
-			if (stderr) {
-				console.error(`Stderr: ${stderr}`);
-			}
-			resolve();
-		});
-	});
 }
 
 class TaskBuilderImpl implements TaskBuilder {
 	private _jobs: Array<() => void | Promise<void>> = [];
 	private _deps: string[] = [];
-	private _ctx: Ctx = new Object();
+	private _ctx: Ctx = {};
 
 	constructor(
 		private _violet: VioletImpl,
@@ -166,30 +143,24 @@ class TaskBuilderImpl implements TaskBuilder {
 
 	dep(...tasks: string[]): this {
 		if (!Array.isArray(tasks) || !tasks.length) {
-			this._violet._warn(
-				`[${this._name}] ERROR: dep() expects an arra of function`,
-			);
+			this._warn("dep() expects an array of function");
 			return this;
 		}
 
-		for (const task of tasks) {
-			this._deps.push(task);
-		}
+		this._deps.push(...tasks);
 		return this;
 	}
 
 	run(...fns: Array<(ctx: Ctx) => Promise<Ctx | void> | (Ctx | void)>): this {
 		if (!Array.isArray(fns) || !fns.length) {
-			this._violet._warn(
-				`[${this._name}] ERROR: run() expects an arra of function`,
-			);
+			this._warn("run() expects an array of function");
 			return this;
 		}
 
 		for (const fn of fns) {
 			this._jobs.push(async () => {
-				const ctx = await fn(this._ctx);
-				if (ctx) this._ctx = ctx;
+				const ret = await fn(this._ctx);
+				if (ret !== undefined) this._ctx = ret;
 			});
 		}
 		return this;
@@ -199,17 +170,15 @@ class TaskBuilderImpl implements TaskBuilder {
 		...fns: Array<(ctx: Ctx) => Promise<Ctx | void> | (Ctx | void)>
 	): this {
 		if (!Array.isArray(fns) || !fns.length) {
-			this._violet._warn(
-				`[${this._name}] ERROR: parallel() expects an arra of function`,
-			);
+			this._warn("parallel() expects an array of function");
 			return this;
 		}
 
 		this._jobs.push(async () => {
 			await Promise.all(
 				fns.map(async (fn) => {
-					const ctx = await fn(this._ctx);
-					if (ctx) this._ctx = ctx;
+					const ret = await fn(this._ctx);
+					if (ret !== undefined) this._ctx = ret;
 				}),
 			);
 		});
@@ -218,26 +187,56 @@ class TaskBuilderImpl implements TaskBuilder {
 
 	exec(...args: string[]): this {
 		if (!Array.isArray(args) || !args.length) {
-			this._violet._warn(
-				`[${this._name}] ERROR: exec() expects an arra of function`,
-			);
+			this._warn("exec() expects an array of function");
 			return this;
 		}
+		const exe = (cmd: string): Promise<void> =>
+			new Promise((res, rej) => {
+				exec(cmd, (error, stdout, stderr) => {
+					if (error) {
+						this._error(error.message);
+						rej();
+					}
+					if (stderr) {
+						this._warn(stderr);
+						rej();
+					}
+					if (stdout) {
+						this._log(stdout);
+						res();
+					}
+				});
+			});
 
-		this._jobs.push(async () => {
-			await exeCommand(args.join(" "));
-		});
+		this._jobs.push(async () => await exe(args.join(" ")));
 		return this;
 	}
 
 	log(...args: string[]): this {
-		this._jobs.push(() => console.log(`[${this._name}] LOG: `, ...args));
+		this._jobs.push(() => console.log(`[${this._name}] LOG:`, ...args));
 		return this;
 	}
 
 	warn(...args: string[]): this {
-		this._jobs.push(() => console.warn(`[${this._name}] WARN: `, ...args));
+		this._jobs.push(() => console.warn(`[${this._name}] WARN:`, ...args));
 		return this;
+	}
+
+	error(...args: string[]): TaskBuilder {
+		this._jobs.push(() => console.warn(`[${this._name}] ERROR:`, ...args));
+		return this;
+	}
+
+	_log(msg: string) {
+		console.log(`[${this._name}] LOG:`, msg);
+	}
+
+	_warn(msg: string) {
+		console.warn(`[${this._name}] WARN:`, msg);
+	}
+
+	_error(msg: string) {
+		console.error(`[${this._name}] ERROR:`, msg);
 	}
 
 	async _complete(): Promise<void> {
@@ -249,18 +248,12 @@ class TaskBuilderImpl implements TaskBuilder {
 			await job();
 		}
 
-		this._violet._log(`[${this._name}] LOG: Task completed`);
+		this._log("Task completed");
 	}
 }
 
-const LogLevelHierarchy: Record<LogLevel, number> = {
-	warn: 2,
-	log: 3,
-};
-
 class VioletImpl implements Violet {
 	private _tasks: Map<string, TaskBuilderImpl> = new Map();
-	private _log_level: number = 1;
 
 	addTask(name: string): TaskBuilderImpl {
 		const task = new TaskBuilderImpl(this, name);
@@ -276,28 +269,6 @@ class VioletImpl implements Violet {
 		}
 
 		await task._complete();
-	}
-
-	logLevel(level: LogLevel): void {
-		this._log_level = LogLevelHierarchy[level];
-	}
-
-	_shouldLog(msgLevel: keyof typeof LogLevelHierarchy): boolean {
-		return (
-			LogLevelHierarchy[msgLevel] <= this._log_level && this._log_level > 0
-		);
-	}
-
-	_log(str: string): void {
-		if (this._shouldLog("log")) {
-			console.log(str);
-		}
-	}
-
-	_warn(str: string): void {
-		if (this._shouldLog("warn")) {
-			console.warn(str);
-		}
 	}
 }
 
